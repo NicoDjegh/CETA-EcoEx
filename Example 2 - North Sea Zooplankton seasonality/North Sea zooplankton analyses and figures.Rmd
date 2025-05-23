@@ -1,0 +1,242 @@
+---
+title: "North Sea zooplankton analyses and figures"
+author: "Nicolas Djeghri"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prepping the analysis
+### Call the packages and data
+
+For this example, the data is available within the `ecotraj` package.
+```{r}
+library(ecotraj)#Main package for trajectory analysis: using version 1.1.0 here
+library(corrplot)
+data("northseaZoo")
+?northseaZoo#Information on the data and data source
+```
+
+### Do all necessary analyses
+
+This is a quick execution without guidance. A more detailed description is available in the [CETA vignette](https://emf-creaf.github.io/ecotraj/articles/IntroductionCETA.html).
+```{r}
+#ecotraj format
+northseaZoo$Dist <- dist(northseaZoo$Hellinger)
+x_northseaZoo <- defineTrajectories(d = northseaZoo$Dist,
+                                    sites = northseaZoo$sites,
+                                    times = northseaZoo$times)
+
+cyclesNSZoo <- extractCycles(x_northseaZoo,
+                             cycleDuration = 1,
+                             minEcolStates = 12)
+
+cyclesZooLengths <- trajectoryLengths(cyclesNSZoo)
+
+cyclesZooConv <- cycleConvexity(x_northseaZoo,
+                                cycleDuration = 1,
+                                minEcolStates = 12)
+
+
+#Prepare things to plot Length and convexity against
+yearCycles <- floor(tapply(cyclesNSZoo$metadata$times,cyclesNSZoo$metadata$cycles,min))
+sitesCycles <- tapply(cyclesNSZoo$metadata$sites,cyclesNSZoo$metadata$cycles,unique)
+
+yearCycles <- yearCycles[unique(cyclesNSZoo$metadata$cycles)]
+sitesCycles <- sitesCycles[unique(cyclesNSZoo$metadata$cycles)]
+
+#put all descriptors together
+StatCyclesZoo <- data.frame(sitesCycles,yearCycles,cyclesZooLengths$Path,cyclesZooConv)
+SNScycles <- subset(StatCyclesZoo,sitesCycles=="SNS")
+NNScycles <- subset(StatCyclesZoo,sitesCycles=="NNS")
+
+#put that in the format of a complete time serie (recreating the holes if any)
+rownames(SNScycles) <- SNScycles$yearCycles
+rownames(NNScycles) <- NNScycles$yearCycles
+
+SNScycles <- SNScycles[as.character(1958:2021),]
+NNScycles <- NNScycles[as.character(1958:2021),]
+
+
+#center cycles
+centered_cyclesNSZoo <- centerTrajectories(cyclesNSZoo)
+
+#then compute distances between centered cycles
+centered_cyclesZooDistances <- trajectoryDistances(centered_cyclesNSZoo)
+
+#before finally making it a trajectory object
+x_second_order_centered <- defineTrajectories(d = centered_cyclesZooDistances,
+                                              sites = sitesCycles,
+                                              surveys = yearCycles)
+
+#Fixed dates trajectories
+fdtrajNSZoo <- extractFixedDateTrajectories(x_northseaZoo,
+                                            cycleDuration = 1,
+                                            namesFixedDate =
+                                              c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"))
+
+#Convergence?
+#We will do it for the two sites (NNS and SNS) separately, so lets pull them apart
+SNSfdtraj <- subsetTrajectories(fdtrajNSZoo,site_selection = "SNS")
+NNSfdtraj <- subsetTrajectories(fdtrajNSZoo,site_selection = "NNS")
+
+#Then we need to keep only the years during which the fixed-date trajectories all have associated ecological states (this is because we want to perform a symmetric convergence test)
+selecSNS <- as.numeric(names(which(table(SNSfdtraj$metadata$times-SNSfdtraj$metadata$dates)==12)))
+selecNNS <- as.numeric(names(which(table(NNSfdtraj$metadata$times-NNSfdtraj$metadata$dates)==12)))
+
+#change the distance matrices
+SNSfdtraj$d <- as.dist(as.matrix(SNSfdtraj$d)[floor(SNSfdtraj$metadata$times)%in%selecSNS,floor(SNSfdtraj$metadata$times)%in%selecSNS])
+NNSfdtraj$d <- as.dist(as.matrix(NNSfdtraj$d)[floor(NNSfdtraj$metadata$times)%in%selecNNS,floor(NNSfdtraj$metadata$times)%in%selecNNS])
+
+# and change metadata
+SNSfdtraj$metadata <- SNSfdtraj$metadata[floor(SNSfdtraj$metadata$times)%in%selecSNS,]
+NNSfdtraj$metadata <- NNSfdtraj$metadata[floor(NNSfdtraj$metadata$times)%in%selecNNS,]
+
+#Now we can compute the convergence!
+SNSfdtrajConv <- trajectoryConvergence(SNSfdtraj,
+                                       type="pairwise.symmetric")
+NNSfdtrajConv <- trajectoryConvergence(NNSfdtraj,
+                                       type="pairwise.symmetric")
+
+#Advances/delays:
+CSNSZoo <- cycleShifts(x_northseaZoo,
+                       cycleDuration = 1)
+
+slopes <- integer(0)
+for (i in c("SNS","NNS")){
+  for (j in unique(CSNSZoo$dateCS)){
+    #prepare the relevant subset
+    subsetCS <- subset(CSNSZoo,sites==i)|>subset(dateCS==j)
+    
+    #compute a slope
+    model <- lm((subsetCS$cyclicalShift*365)~subsetCS$timeScale)
+    #Note that we multiply the shift by 365 to get in days
+    sum <- summary(model)
+    slopes <- rbind(slopes,data.frame(i,j,model$coefficients[2]))
+  }
+}
+colnames(slopes) <- c("sites","month","slope")
+```
+
+# Make the figures
+
+### Making figure 7
+```{r}
+pdf("Figure 7.pdf",width=8,height=3.2)
+layout(matrix(c(1,1,5,2,3,5,4,4,5),3,3),heights=c(1,1,0.35))
+
+par(las=1,mar=c(0.5,4,0.5,1),xpd=NA)
+cyclePCoA(cyclesNSZoo,
+          sites.colors = c("#57AFA6","#BF812D"),
+          length = 0.05,print.init.points = TRUE)
+legend(x="bottomright",col=c("#57AFA6","#BF812D"),pch=15,unique(northseaZoo$sites),bty="n")
+legend(legend=expression(paste(Omega[0]," space")),bty="n",x="topright",text.font=4)
+mtext("(a)",line=-1,at=-0.7,font=2,cex=0.8)
+
+par(mar=c(0.5,4,0.5,1))
+plot(SNScycles$yearCycles,SNScycles$cyclesZooLengths.Path,type="l",
+     las=1,ylab="Cycle length",xlab="",ylim=c(2.7,5),col="#BF812D",lwd=2,xaxt="n")
+points(NNScycles$yearCycles,NNScycles$cyclesZooLengths.Path,type="l",col="#57AFA6",lwd=2)
+mtext("(b)",line=-1,at=1940,font=2,cex=0.8)
+
+plot(SNScycles$yearCycles,SNScycles$cyclesZooConv,type="l",
+     las=1,ylab="Cycle convexity",xlab="Years",ylim=c(0.27,0.5),col="#BF812D",lwd=2,xpd=NA)
+points(NNScycles$yearCycles,NNScycles$cyclesZooConv,type="l",col="#57AFA6",lwd=2)
+mtext("(c)",line=-1,at=1940,font=2,cex=0.8)
+
+
+par(mar=c(0.5,4,0.5,1),xpd=NA)
+PCoA_second_order_centered <- trajectoryPCoA(x_second_order_centered,
+                                             traj.colors=c("#57AFA6","#BF812D"),
+                                             length=0.05)
+text(PCoA_second_order_centered$points[c("NNS_C40","SNS_C37","NNS_C27"),1:2],
+     c("1997","1997","1984"),col="grey20",font=4)
+legend(legend=expression(paste(Omega[C]^Cent," space")),bty="n",x="topright",text.font=4)
+mtext("(d)",line=-1,at=-0.4,font=2,cex=0.8)
+
+dev.off()
+```
+
+### Making figure 8
+```{r}
+MatSNS <- matrix(as.vector(SNSfdtrajConv$tau)*as.numeric(SNSfdtrajConv$p.value<0.05),12,12)
+MatNNS <- matrix(as.vector(NNSfdtrajConv$tau)*as.numeric(NNSfdtrajConv$p.value<0.05),12,12)
+colnames(MatSNS) <- c("J","F","M","A","M","J","J","A","S","O","N","D")
+colnames(MatNNS) <- rep(NA,12)
+rownames(MatNNS) <- colnames(MatSNS)
+rownames(MatSNS) <- rep(NA,12)
+
+pdf("Figure 8.pdf",width=5,height=4)
+
+layout(matrix(c(2,1),2,1),heights=c(0.1,1))
+corrplot(MatSNS,type="upper",tl.col="black",col=COL2("RdYlBu"),tl.srt=0,tl.offset=0.7,xpd=NA)
+corrplot(MatNNS,type="lower",add=T,tl.col="black",col=COL2("RdYlBu"))
+rect(xleft=seq(0.5,11.5,1),xright=seq(1.5,12.5,1),
+     ytop=seq(12.5,1.5,-1),ybottom=seq(11.5,0.5,-1),col="grey80",
+     border=NA,xpd=NA)
+rect(xleft=-1,xright=13,
+     ytop=0.45,ybottom=-1,col="white",
+     border=NA,xpd=NA)
+polygon(x=c(0.7,12.5,12.5),y=c(12.5,12.5,0.7),xpd=NA,border="#BF812D",lwd=5)
+polygon(x=c(0.5,0.5,12.3),y=c(12.3,0.5,0.5),xpd=NA,border="#57AFA6",lwd=5)
+text("Mann-Kendall's tau",x=14.5,y=6.5,srt=90,xpd=NA)
+text(c("< Convergence","Divergence >"),x=14.5,y=c(1.75,11.25),srt=90,xpd=NA,font=3,col="grey40",cex=0.8)
+
+text("Southern North Sea",x=0.5,y=13.5,xpd=NA,col="#BF812D",font=4,pos=4)
+text("Northern North Sea",x=-0.3,y=12.5,xpd=NA,srt=90,col="#57AFA6",font=4,pos=2)
+
+dev.off()
+```
+### Making figure 9
+```{r}
+pdf("Figure 9.pdf",width=5,height=3.5)
+layout(matrix(c(rep(3,6),1,1,1,3,3,1,2,1,3,3,1,1,1,rep(3,6)),5,5),
+       widths=c(1.5,6,4.25,1.75,1),heights=c(1,0.75,4,14.25,2))
+par(mgp=c(2,1,0))
+#main graph------------
+par(mar=c(0,0,0,0))
+plot(x=NA,y=NA,
+     las=1,
+     ylab="Trends in cyclical shift (days/decade)",xlab="",
+     ylim=c(-3,16),xlim=c(0.5,12.5),yaxs="i",xaxs="i",xpd=NA,xaxt="n",
+     cex.axis=1.2,cex.lab=1.2)
+
+segments(y0=slopes$slope[slopes$sites=="SNS"][5]*10,x0=5,y1=12.5,x1=6.5)
+points(y=slopes$slope[slopes$sites=="SNS"][5]*10,x=5,cex=3,pch=21,bg="white")
+abline(h=0,col="grey70")
+
+points(x=slopes$month[slopes$sites=="SNS"]*12+0.5,
+       y=slopes$slope[slopes$sites=="SNS"]*10,
+       type="b",col="#BF812D",pch=16,lwd=2,cex=2)
+points(x=slopes$month[slopes$sites=="NNS"]*12+0.5,
+       y=slopes$slope[slopes$sites=="NNS"]*10,
+       type="b",col="#57AFA6",pch=16,lwd=2,cex=2)
+
+axis(side=1,at=1:12,c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"),cex.axis=1.1)
+legend(x="topleft",col=c("#57AFA6","#BF812D"),pch=15,unique(northseaZoo$sites),bty="n",cex=1.2)
+box()
+
+#insert-------
+i <- "SNS"
+j <- unique(CSNSZoo$dateCS)[5]
+subsetCS <- subset(CSNSZoo,sites==i)|>subset(dateCS==j)
+model <- lm((subsetCS$cyclicalShift*365)~subsetCS$timeScale)
+
+plot(x=subsetCS$timeScale,y=subsetCS$cyclicalShift*365,ylim=c(-75,182.5),
+     col=rgb(0,0,0,0.2),
+     las=1,xpd=NA,yaxt="n",
+     pch=16,xlab="Time scale (Years)",ylab="",main="")
+axis(side=4,las=1)
+mtext(side=4,line=3,"Cyclical shift (d)",cex=0.7)
+abline(h=0,col="grey70")
+abline(model,lwd=2,col="orangered",lty=2)
+box() 
+#END---------
+dev.off()
+
+```
+
+
