@@ -1,0 +1,293 @@
+---
+title: "Insects analyses and figures"
+author: "Nicolas Djeghri"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prepping the analysis
+### Call the packages
+```{r}
+library(lubridate)
+library(cmocean)
+library(ecotraj)#Main package for trajectory analysis: using version 1.1.0 here
+library(ape)
+library(vegan)
+```
+
+
+### Call the data
+The data originates from the [Sticky pi github page](https://github.com/sticky-pi/sticky-pi-manuscript) authored by Quentin Geissmann. 
+```{r}
+data <- read.csv("itc_labels.csv")
+metadata <- read.csv("metadata.csv")
+```
+
+### Shape the data
+
+This code chunk isolate what we need in the data.
+```{r}
+#Remove non-insect lines
+data <- data[data$type_itc=="Insecta",]
+#We will work at family level: remove undetermined families:
+data <- data[(data$family_itc=="")==F,]
+
+#Rebuild data:
+data <- data.frame(trap_id=data$device_series,
+                   trap_setDate=ymd_hms(data$start_datetime_series),
+                   capture_date=ymd_hms(data$start_datetime),
+                   capture_family=data$family_itc)
+
+#Change metadata a tiny bit:
+metadata$start_datetime <- ymd_hms(metadata$start_datetime)
+metadata$end_datetime <- ymd_hms(metadata$end_datetime)
+
+#add a "trap/time id":
+trapTime_id <- paste(data$trap_id,data$trap_setDate)
+data <- cbind(trapTime_id,data)
+
+trapTime_id <- paste(metadata$device,metadata$start_datetime)
+metadata <- cbind(trapTime_id,metadata)
+```
+
+This code chunk goes wide format building a first "sites" x taxa table by binning by hour and trap.
+```{r}
+#Bin by trap and hours:
+counts <- integer(0)
+metadataCounts <- integer(0)
+families <- unique(data$capture_family)
+
+for (i in unique(data$trapTime_id)){
+  databis <- data[data$trapTime_id==i,c("capture_date","capture_family")]
+  start <- metadata$start_datetime[metadata$trapTime_id==i]
+  end <- metadata$end_datetime[metadata$trapTime_id==i]
+  
+  nhours <- floor(as.numeric(end-start,units="hours"))-1
+  
+  countsbis <- matrix(0,nrow=nhours,ncol=length(families))
+  colnames(countsbis) <- families
+  
+  metadataCountsbis <- data.frame(trapTime_id=rep(i,nhours),
+                                  time=start+hours(1:nhours),
+                                  bait=rep(metadata$vinegar_bait[metadata$trapTime_id==i],nhours))
+  
+  for (j in 1:nrow(databis)){
+    row <- which(((metadataCountsbis$time+hours(1))>=databis$capture_date[j])&(metadataCountsbis$time<databis$capture_date[j]))
+    countsbis[row,databis$capture_family[j]] <- countsbis[row,databis$capture_family[j]]+1
+  }
+  metadataCounts <- rbind(metadataCounts,metadataCountsbis)
+  counts <- rbind(counts,countsbis)
+}
+```
+
+Finally this chunk of code averages out across traps having the same treatment and on three broad periods to get six (three periods x two treatments) day/night cycles (reducing data sparsity). The choice of the three periods is linked to figure 5 in [Geissmann et al. (2022)](https://journals.plos.org/plosbiology/article?id=10.1371/journal.pbio.3001689) cutting the period of "low everything" (period A below) of "high Drosophilidae" (period B below) and of "hgh Figitidae" (period C below).
+
+```{r}
+#add big periods to group things:
+bigPeriods <- rep("A",nrow(metadataCounts))
+bigPeriods[metadataCounts$time>=ymd_hms("2020/09/06 00:00:00")] <- "B"
+bigPeriods[metadataCounts$time>=ymd_hms("2020/09/25 00:00:00")] <- "C"
+metadataCounts <- cbind(metadataCounts,bigPeriods)
+
+AVcounts <- integer(0)
+AVmetadata <- integer(0)
+for (i in c("Y","N")){
+  for (j in c("A","B","C")){
+    #by same "real time"
+    selec <- (metadataCounts$bait==i)&(metadataCounts$bigPeriods==j)
+    newcounts <- apply(counts[selec,],2,tapply,metadataCounts$time[selec],mean)
+    
+    #by hours of the day
+    hours <- (hour(unique(metadataCounts$time[selec]))-8)%%24#note that here we go local time
+    newcounts <- apply(newcounts,2,tapply,hours,mean)
+    
+    
+    AVcounts <- rbind(AVcounts,newcounts)
+    AVmetadata <- rbind(AVmetadata,data.frame(bait=rep(i,nrow(newcounts)),
+                                              bigPeriods=rep(j,nrow(newcounts)),
+                                              hours=as.numeric(rownames(newcounts))))
+  }
+}
+```
+
+### Look a bit at the data
+Rank-abundance plots:
+```{r fig = TRUE, fig.height=5, fig.width=7, fig.align = "center"}
+par(mar=c(8,4,2,2))
+barplot(sort(apply(AVcounts,2,mean),decreasing=T),las=2,ylab="Abundance",main="On shaped data")
+
+par(mar=c(8,4,2,2))
+barplot(sort(table(data$capture_family),decreasing=T),las=2,ylab="Abundance", main="On raw data")
+```
+
+Note that we don't have quite the same rank-abundance plots after shaping the data: this is due to averaging. In raw data we simply plot sum the counted individuals, in the shaped data we represent communities (i.e. the composition at a given time) and average them.
+
+# Go trajectory analysis
+Preliminary analyses have shown that cycle metrics are quite unclear with that example (data is probably too sparse). What is however interesting is to "focus on fixed-date trajectories" (in this case it is "more fixed-hour trajectories") i.e. the trajectory described by the community at a given point of the day-night cycle over different cycles (here, three cycles).
+
+### Visualize the cyles
+Although we won't work too much on them, we can always visualize the cycles. Because we work on three artificial periods and not a true time series, we need to cheat the system a little bit and close the cycles on themselves:
+```{r}
+#First reshape the abundance table
+AVcountsCycles <- integer(0)
+AVmetadataCycles <- integer(0)
+for (i in c("Y","N")){
+  for (j in c("A","B","C")){
+    selec <- (AVmetadata$bait==i)&(AVmetadata$bigPeriods==j)
+    AVcountsCycles <- rbind(AVcountsCycles,AVcounts[selec,],AVcounts[(AVmetadata$hours==0)&selec,])
+    AVmetadataCycles <- rbind(AVmetadataCycles,AVmetadata[selec,],data.frame(bait=i,bigPeriods=j,hours=24))
+  }
+}
+
+#Then recompute a distance matrix and go ecotraj format:
+d <- vegdist(AVcountsCycles)#Note that we work with percentage difference (Bray-Curtis) distances
+sites <- paste(AVmetadataCycles$bait,AVmetadataCycles$bigPeriods)
+times <- (AVmetadataCycles$hours)
+Trajbis <- defineTrajectories(d,sites=sites,times=times)
+Cycles <- extractCycles(Trajbis,24)
+```
+
+```{r fig = TRUE, fig.height=5, fig.width=5, fig.align = "center"}
+colCycles <- c("sienna1","sienna3","sienna4","skyblue1","skyblue3","skyblue4")
+names(colCycles) <- unique(sites)
+cyclePCoA(Cycles,sites.colors = colCycles,lwd=2,length=0.1)
+```
+
+Brown colors indicate the traps with bait (i.e. the experimental traps) whereas the blue colors indicate the controls. Darker indicate latter sampling. Although it is a bit busy, we see first: there are clear community structure linked to the day/night cycle (oof!): the cycles can be followed and are not bunch confusingly in on place. Second: there is some "long-term" change along axis 2: darker cycles  are on top, lighter cycles on the bottom. Third: there seems to be an effect of the experimental treatment: blue cycles are always further on axis 2 as compared to their brown counterparts.  
+Let's now look at the fixed-date trajectories:
+
+
+###Visualize the fixed date trajectories
+We start by getting the fixed-date trajectories in ecotraj format. We can't use the dedicated Cyclical Ecological Trajectory Analysis functions in `ecotraj` because again, we do not exactly work with a time series. However, we can tweak our use of classic Ecological Trajectory Analysis functions to make them do what we need!
+```{r}
+d <- vegdist(AVcounts)
+sites <- paste(AVmetadata$bait,AVmetadata$hours)
+times <- c(rep(1:3,each=24),rep(1:3,each=24))
+fdT <- defineTrajectories(d,sites=sites,times=times)
+fdT_centered <- centerTrajectories(fdT)#same but centered
+```
+
+### Making figure 10
+```{r}
+#graphical parameters:
+baseCol <- (cmocean("phase")(24))[c(13:24,1:12)]
+
+colfdT_N <- c(baseCol,rep(rgb(1,1,1,0),24))
+colfdT_Y <- c(rep(rgb(1,1,1,0),24),baseCol)
+colfdT_All <- c(baseCol,baseCol)
+pchfdT_All <- c(rep(16,24),rep(1,24))
+
+#first figure Omega0 space---------
+pdf("Figure 10.pdf",width=7,height=7)
+
+layout(matrix(c(rep(6,5),1,2,5,6,6,6,5,6,3,4,5),4,4),widths=c(0.3,1,0.25,1),heights=c(0.1,1,1,0.5))
+
+#not centered---------
+par(las=1,mar=c(0.5,0,0,0.5),xpd=NA,xaxt="n",col.lab="white")
+trajectoryPCoA(fdT,traj.col=colfdT_N,lwd=2,length=0.1,axes=c(1,2))
+mtext("Non-centered",line=0.5,font=4,col="grey30")
+mtext("Control",line=4,side=2,las=0,font=4,col="grey30")
+par(las=1)
+legend(legend=expression(paste(Omega[0]," space")),bty="n",x="bottomright",text.font=4)
+mtext(side=3,"(a)",cex=0.8,at=-0.9,xpd=NA,line=-1,font=2)
+
+par(xaxt="s",col.lab="black")
+title(ylab="PCoA 2 (10%)")
+
+trajectoryPCoA(fdT,traj.col=colfdT_Y,lwd=2,length=0.1,axes=c(1,2))
+mtext("Baited",line=4,side=2,las=0,font=4,col="grey30")
+par(las=1)
+legend(legend=expression(paste(Omega[0]," space")),bty="n",x="bottomright",text.font=4)
+mtext(side=3,"(b)",cex=0.8,at=-0.9,xpd=NA,line=-1,font=2)
+
+
+#centered------
+par(xaxt="n",col.lab="white")
+trajectoryPCoA(fdT_centered,traj.col=colfdT_N,lwd=2,length=0.1,axes=c(1,2))
+mtext("Centered",line=0.5,font=4,col="grey30")
+legend(legend=expression(paste(Omega[0]^Cent," space")),bty="n",x="bottomright",text.font=4)
+mtext(side=3,"(c)",cex=0.8,at=-0.95,xpd=NA,line=-1,font=2)
+
+par(xaxt="s",col.lab="black")
+title(ylab="PCoA 2 (7%)")
+
+trajectoryPCoA(fdT_centered,traj.col=colfdT_Y,lwd=2,length=0.1,axes=c(1,2))
+legend(legend=expression(paste(Omega[0]^Cent," space")),bty="n",x="bottomright",text.font=4)
+mtext(side=3,"(d)",cex=0.8,at=-0.95,xpd=NA,line=-1,font=2)
+
+#legend-----
+par(mar=c(4.5,6,4,6))
+barplot(rep(1,24),col=baseCol,space=0,border=NA,yaxt="n",yaxs="i",xaxs="i",ylim=c(0,1))
+axis(side=1,at=seq(0,22,2)+0.5,labels=seq(0,22,2))
+mtext("Hour of the day",side=1,line=3,cex=0.8)
+box()
+
+#END-----
+dev.off()
+```
+### Distance between fixed-date trajectories
+
+We can now compute dissimilarities (as distances) between the fixed-date trajectories and go in a simplified similarity space
+```{r}
+dfdT <- trajectoryDistances(fdT)
+dfdT_centered <- trajectoryDistances(fdT_centered)
+```
+
+### Making figure 11
+```{r}
+DayNight <- rep(c(rep("Night",5),rep("Day",14),rep("Night",5)),2)
+Bait <- c(rep("Y",24),rep("N",24))
+
+colDayNight <- c("gold","darkblue")
+names(colDayNight) <- c("Day","Night")
+colDayNight <- colDayNight[DayNight]
+
+
+pdf("Figure 11.pdf",width=8,height=4)
+layout(matrix(1:2,1,2))
+par(mar=c(4,4,2,1))
+
+pcoafdT <- pcoa(dfdT)
+plot(pcoafdT$vectors[,1:2],
+     xlab=paste0("PCoA 1 (",round(pcoafdT$values$Relative_eig[1]*100)," %)"),
+     ylab=paste0("PCoA 2 (",round(pcoafdT$values$Relative_eig[2]*100)," %)"),
+     col=colDayNight,pch=pchfdT_All,
+     las=1,asp=1,main="",lwd=2,xaxt="n")
+axis(side=1,at=c(-0.6,-0.3,0,0.3),labels=c(-0.6,-0.3,0,0.3))
+mtext("Non-centered",line=0.5,font=4,col="grey30")
+legend(legend=expression(paste(Omega[fdT]," space")),bty="n",x="bottomright",text.font=4)
+legend(legend=c("Day hours","Night hours","Control","Baited"),pch=c(22,22,1,16),pt.bg=c("gold","darkblue","black","black"),pt.lwd=c(1,1,2,2),bty="n",x="bottomleft")
+mtext(side=3,"(a)",cex=0.8,at=-1.2,xpd=NA,line=-1,font=2)
+
+pcoafdT_centered <- pcoa(dfdT_centered)
+plot(pcoafdT_centered$vectors[,1:2],
+     xlab=paste0("PCoA 1 (",round(pcoafdT_centered$values$Relative_eig[1]*100)," %)"),
+     ylab=paste0("PCoA 2 (",round(pcoafdT_centered$values$Relative_eig[2]*100)," %)"),
+     col=colDayNight,pch=pchfdT_All,
+     las=1,asp=1,lwd=2,main="")
+mtext("Centered",line=0.5,font=4,col="grey30")
+legend(legend=expression(paste(Omega[fdT]^Cent," space")),bty="n",x="bottomright",text.font=4)
+mtext(side=3,"(b)",cex=0.8,at=-0.9,xpd=NA,line=-1,font=2)
+
+dev.off()
+```
+### Finally perform the statistical tests
+```{r}
+#Homogeneity of variance test--------
+VarHomfdT <- betadisper(d=dfdT,g=paste(DayNight,Bait))
+VarHomfdT_centered <- betadisper(d=dfdT_centered,g=paste(DayNight,Bait))
+
+anova(VarHomfdT)
+anova(VarHomfdT_centered)
+
+#PERMANOVAS-------
+permanovafdT <- adonis2(dfdT~DayNight*Bait,by="terms")
+permanovafdT_centered <- adonis2(dfdT_centered~DayNight*Bait,by="terms")#technically we can't do this one because variance homogeneity is not respected 
+
+permanovafdT
+permanovafdT_centered
+```
