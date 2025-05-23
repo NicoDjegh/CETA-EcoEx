@@ -1,0 +1,558 @@
+---
+title: "Coast-HF-Iroise example for CETA"
+author: "Nicolas Djeghri"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Prepping the analysis
+### Call the packages
+```{r}
+library(lubridate)
+library(ecotraj)#Main package for trajectory analysis: using version 1.1.0 here
+library(vegan)
+library(ade4)
+library(adespatial)
+library(ape)
+library(colourvalues)
+```
+
+### Call the data
+The data called here originates from the Coast-HF [Iroise buoy](https://www-iuem.univ-brest.fr/observation/coastal-and-littoral-observation/coast-hf-iroise/?lang=en). Fluorescence has already been log10 + 1 transformed
+```{r}
+data <- read.csv("data_Iroise_selected.csv",row.names=1) #contains the data
+timeTable <- read.csv("timeTable_Iroise_selected.csv",row.names=1) #contains observation times as well as information on tides (obtained from the SHOM)
+timeTable$RawTimes <- ymd_hms(timeTable$RawTimes) #some will fail to parse but it is ok, we won't use that vector for the analyses
+```
+
+
+### Do some preliminary visualization
+
+Plot the time series
+```{r fig = TRUE, fig.height=5, fig.width=7, fig.align = "center"}
+plot(timeTable$RawTimes,data$salinity,pch=20,cex=0.5,las=1,
+     ylab="Salinity (PSU)",xlab="Time")
+plot(timeTable$RawTimes,data$temperature,pch=20,cex=0.5,las=1,
+     ylab="Temperature (°C)",xlab="Time")
+plot(timeTable$RawTimes,data$oxygen,pch=20,cex=0.5,las=1,
+     ylab="Oxygen (ml/l)",xlab="Time")
+plot(timeTable$RawTimes,data$fluo,pch=20,cex=0.5,las=1,
+     ylab="Fluorescence (log10(FFU + 1))",xlab="Time")
+```
+
+# Fit a db-MEM (distance-based Moran Eigenvector Maps)
+
+### First: broad db-MEM
+Build the MEMs
+```{r}
+thresh <- max(timeTable$YearTimes[2:nrow(timeTable)]
+              -timeTable$YearTimes[1:(nrow(timeTable)-1)])
+
+MEMs <- dist(timeTable$YearTimes)
+MEMs <- dbmem(MEMs,thresh=thresh,MEM.autocor="positive")
+```
+
+Regress the MEMs against the variable in a RDA
+```{r}
+rdaMEM <- rda(data~.,data=MEMs,scale=TRUE)
+```
+
+Compute R² of each MEMs (WARNING: THIS CAN BE LONG! To ease everything I provide the outputs but you can recompute everything by playing with the comments)
+```{r}
+#anovaMEMs <- anova.cca(rdaMEM,by="terms",permutation=5)
+#save(anovaMEMs,file="anovaMEMs.RData")
+load("anovaMEMs.RData")
+RsqMEMs <- anovaMEMs$Variance[1:(length(anovaMEMs$Variance)-1)]/sum(anovaMEMs$Variance)
+names(RsqMEMs) <- colnames(MEMs)
+```
+
+And plot a first scalogram
+```{r fig = TRUE, fig.height=5, fig.width=8, fig.align = "center"}
+plot(RsqMEMs,type="b",las=1,ylab="Unadjusted R²",xlab="Eigenfunction number",pch=21,bg="grey")
+```
+
+### Forward selection of MEMs and second db-MEM
+The forward selection procedure is designed to avoid overfitting (WARNING: THIS CAN BE LONG TOO! To ease everything I provide the outputs but you can recompute everything by playing with the comments).  
+Note that here the forward selection criterion (alpha = 0.01, r2more = 0.0001) allows minor improvement to the model (+0.0001 to R²), as long as they have a rather high significance (alpha = 0.01). My rationale being: we have a comfortable number of data points (2103) so we can afford being precise (small improvement in R²) as long as we are confident on it (low alpha).
+```{r}
+#ForSel <- forward.sel(Y=data,X=MEMs,Yscale=TRUE,alpha=0.01,R2more=0.0001)
+#save(ForSel,file="ForwardSelection.RData")
+load("ForwardSelection.RData")
+MEMsSel <- MEMs[,colnames(MEMs)%in%ForSel$variables]
+```
+
+Scalogram with the selected MEMs
+```{r fig = TRUE, fig.height=5, fig.width=8, fig.align = "center"}
+bgCol <- rep("grey",length(RsqMEMs))
+names(bgCol) <- names(RsqMEMs)
+bgCol[colnames(MEMsSel)] <- "orangered"
+
+plot(RsqMEMs,type="b",las=1,ylab="Unadjusted R²",xlab="Eigenfunction number",pch=21,bg=bgCol)
+```
+
+The orange points are the ones kept after the forward selection procedure  
+
+Second RDA with only selected MEMs
+```{r}
+rdaMEMSel <- rda(data~.,data=MEMsSel,scale=TRUE)
+```
+
+### Compare the two db-MEMs
+```{r}
+sum1 <- summary(rdaMEM)
+sum1$cont
+
+sum2 <- summary(rdaMEMSel)
+sum2$cont
+```
+
+The total variance constrained by the first RDA is higher (91.4 %) than with the second (89.1 %) taking only selected MEMs: This is expected (oof!) but in any case the proportion of variance constrained is high! So both should be pretty good to model the data.  
+
+We will make a lot of graph to compare data and model(s) in all cases: the data are black points, the model without selection is in blue and the model with selection is in red. If you see only red, this is because the blue is behind!
+```{r fig = TRUE, fig.height=5, fig.width=7, fig.align = "center"}
+plot(timeTable$RawTimes,data$salinity,pch=20,cex=0.5,las=1,ylab="Salinity (PSU)",xlab="Time")
+points(timeTable$RawTimes,predict(rdaMEM)[,"salinity"],type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaMEMSel)[,"salinity"],type="l",col="red")
+
+plot(timeTable$RawTimes,data$temperature,pch=20,cex=0.5,las=1,ylab="Temperature (°C)",xlab="Time")
+points(timeTable$RawTimes,predict(rdaMEM)[,"temperature"],type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaMEMSel)[,"temperature"],type="l",col="red")
+
+plot(timeTable$RawTimes,data$oxygen,pch=20,cex=0.5,las=1,ylab="Oxygen (ml/l)",xlab="Time")
+points(timeTable$RawTimes,predict(rdaMEM)[,"oxygen"],type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaMEMSel)[,"oxygen"],type="l",col="red")
+
+plot(timeTable$RawTimes,data$fluo,pch=20,cex=0.5,las=1,ylab="Fluorescence (Log(FFU + 1))",xlab="Time")
+points(timeTable$RawTimes,predict(rdaMEM)[,"fluo"],type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaMEMSel)[,"fluo"],type="l",col="red")
+```
+
+The model with selection behave well. It follows the data quite closely without having too much jitter.
+
+# Look at different sub-models representing different time scales
+
+We will keep both models here (with and without forward selection) and compare how they perform at different time scales.
+
+### Back to the scalogram to identificatify possible sub-models
+
+```{r fig = TRUE, fig.height=5, fig.width=8, fig.align = "center"}
+MEMsSelNumb <- as.numeric(gsub("MEM","",colnames(MEMsSel)))
+plot(RsqMEMs,type="b",las=1,ylab="Unadjusted R²",xlab="Eigenfunction number",pch=21,bg=bgCol,
+     xlim=c(0,max(MEMsSelNumb)))
+axis(side=1,at=seq(0,200,10))
+abline(v=c(30,80),col="dodgerblue")
+```
+
+The blue lines (more or less arbitrarily) separate the MEMs modelling "large", "middle" and "small" temporal scales. Their exact position might be debatable but we'll see below that they are not that dumb.
+
+### Large-scale model
+Computation
+```{r}
+LS_MEMs <- MEMs[,1:30]
+rdaLS <- rda(data~.,data=LS_MEMs,scale=TRUE)
+
+LS_MEMs_Sel <- MEMsSel[,MEMsSelNumb<=30]
+rdaLS_Sel <- rda(data~.,data=LS_MEMs_Sel,scale=TRUE)
+```
+
+Plot it!
+```{r fig = TRUE, fig.height=5, fig.width=7, fig.align = "center"}
+plot(timeTable$RawTimes,data$salinity,pch=20,cex=0.5,las=1,ylab="Salinity (PSU)",xlab="Time")
+points(timeTable$RawTimes,predict(rdaLS)[,"salinity"],type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaLS_Sel)[,"salinity"],type="l",col="red")
+
+plot(timeTable$RawTimes,data$temperature,pch=20,cex=0.5,las=1,ylab="Temperature (°C)",xlab="Time")
+points(timeTable$RawTimes,predict(rdaLS)[,"temperature"],type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaLS_Sel)[,"temperature"],type="l",col="red")
+
+plot(timeTable$RawTimes,data$oxygen,pch=20,cex=0.5,las=1,ylab="Oxygen (ml/l)",xlab="Time")
+points(timeTable$RawTimes,predict(rdaLS)[,"oxygen"],type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaLS_Sel)[,"oxygen"],type="l",col="red")
+
+plot(timeTable$RawTimes,data$fluo,pch=20,cex=0.5,las=1,ylab="Fluorescence (Log(FFU + 1))",xlab="Time")
+points(timeTable$RawTimes,predict(rdaLS)[,"fluo"],type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaLS_Sel)[,"fluo"],type="l",col="red")
+```
+
+### Middle scale model
+Computation
+```{r}
+MS_MEMs <- MEMs[,31:80]
+rdaMS <- rda(data~.,data=MS_MEMs,scale=TRUE)
+
+MS_MEMs_Sel <- MEMsSel[,(MEMsSelNumb>30)&(MEMsSelNumb<=80)]
+rdaMS_Sel <- rda(data~.,data=MS_MEMs_Sel,scale=TRUE)
+```
+
+Plot it!
+```{r fig = TRUE, fig.height=5, fig.width=7, fig.align = "center"}
+plot(timeTable$RawTimes,data$salinity-predict(rdaLS)[,"salinity"],
+     pch=20,cex=0.5,las=1,ylab="Salinity (PSU)",xlab="Time")
+points(timeTable$RawTimes,predict(rdaMS)[,"salinity"]-mean(predict(rdaMS)[,"salinity"]),
+       type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaMS_Sel)[,"salinity"]-mean(predict(rdaMS_Sel)[,"salinity"]),
+       type="l",col="red")
+
+plot(timeTable$RawTimes,data$temperature-predict(rdaLS)[,"temperature"],
+     pch=20,cex=0.5,las=1,ylab="Temperature (°C)",xlab="Time")
+points(timeTable$RawTimes,predict(rdaMS)[,"temperature"]-mean(predict(rdaMS)[,"temperature"]),
+       type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaMS_Sel)[,"temperature"]-mean(predict(rdaMS_Sel)[,"temperature"]),
+       type="l",col="red")
+
+plot(timeTable$RawTimes,data$oxygen-predict(rdaLS)[,"oxygen"],
+     pch=20,cex=0.5,las=1,ylab="Oxygen (ml/l)",xlab="Time")
+points(timeTable$RawTimes,predict(rdaMS)[,"oxygen"]-mean(predict(rdaMS)[,"oxygen"]),
+       type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaMS_Sel)[,"oxygen"]-mean(predict(rdaMS_Sel)[,"oxygen"]),
+       type="l",col="red")
+
+plot(timeTable$RawTimes,data$fluo-predict(rdaLS)[,"fluo"],
+     pch=20,cex=0.5,las=1,ylab="Fluorescence (Log(FFU + 1))",xlab="Time")
+points(timeTable$RawTimes,predict(rdaMS)[,"fluo"]-mean(predict(rdaMS)[,"fluo"]),
+       type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaMS_Sel)[,"fluo"]-mean(predict(rdaMS_Sel)[,"fluo"]),
+       type="l",col="red")
+
+```
+
+Note that for displaying purpose we remove the "total" model from the time scale above.  
+IMPORTANT: we have about 30 peaks in this middle scale model: it is this the daily cycle
+
+### Small scale model
+Computation
+```{r}
+SS_MEMs <- MEMs[,81:ncol(MEMs)]
+rdaSS <- rda(data~.,data=SS_MEMs,scale=TRUE)
+
+SS_MEMs_Sel <- MEMsSel[,MEMsSelNumb>80]
+rdaSS_Sel <- rda(data~.,data=SS_MEMs_Sel,scale=TRUE)
+```
+
+Plot it!
+```{r fig = TRUE, fig.height=5, fig.width=7, fig.align = "center"}
+plot(timeTable$RawTimes,data$salinity
+     -predict(rdaLS)[,"salinity"]
+     -(predict(rdaMS)[,"salinity"]-mean(predict(rdaMS)[,"salinity"])),
+     
+     pch=20,cex=0.5,las=1,ylab="Salinity (PSU)",xlab="Time")
+points(timeTable$RawTimes,predict(rdaSS)[,"salinity"]-mean(predict(rdaSS)[,"salinity"]),
+       type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaSS_Sel)[,"salinity"]-mean(predict(rdaSS_Sel)[,"salinity"]),
+       type="l",col="red")
+
+plot(timeTable$RawTimes,data$temperature
+     -predict(rdaLS)[,"temperature"]
+     -(predict(rdaMS)[,"temperature"]-mean(predict(rdaMS)[,"temperature"])),
+       
+     pch=20,cex=0.5,las=1,ylab="Temperature (°C)",xlab="Time")
+points(timeTable$RawTimes,predict(rdaSS)[,"temperature"]-mean(predict(rdaSS)[,"temperature"]),
+       type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaSS_Sel)[,"temperature"]-mean(predict(rdaSS_Sel)[,"temperature"]),
+       type="l",col="red")
+
+plot(timeTable$RawTimes,data$oxygen
+     -predict(rdaLS)[,"oxygen"]
+     -(predict(rdaMS)[,"oxygen"]-mean(predict(rdaMS)[,"oxygen"])),
+     
+     pch=20,cex=0.5,las=1,ylab="Oxygen (ml/l)",xlab="Time")
+points(timeTable$RawTimes,predict(rdaSS)[,"oxygen"]-mean(predict(rdaSS)[,"oxygen"]),
+       type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaSS_Sel)[,"oxygen"]-mean(predict(rdaSS_Sel)[,"oxygen"]),
+       type="l",col="red")
+
+plot(timeTable$RawTimes,data$fluo
+     -predict(rdaLS)[,"fluo"]
+     -(predict(rdaMS)[,"fluo"]-mean(predict(rdaMS)[,"fluo"])),
+     
+     pch=20,cex=0.5,las=1,ylab="Fluorescence (Log(FFU + 1))",xlab="Time")
+points(timeTable$RawTimes,predict(rdaSS)[,"fluo"]-mean(predict(rdaSS)[,"fluo"]),
+       type="l",col="blue")
+points(timeTable$RawTimes,predict(rdaSS_Sel)[,"fluo"]-mean(predict(rdaSS_Sel)[,"fluo"]),
+       type="l",col="red")
+
+```
+
+
+Again, for displaying purpose we remove the "total" model from the time scales above (large and middle).  
+IMPORTANT: we have about 60 peaks in this small scale model: it is this the tidal cycle
+
+### Making figure 12 in the paper
+```{r}
+#That will make the dates appear in english!
+Sys.setlocale("LC_ALL","en_US")
+
+#First figure: scalogram + data/model + tidal data/model---------------
+pdf(file="Figure 12.pdf",width=6,height=7)
+layout(matrix(c(rep(10,6),1:5,10,1,6:10),6,3),widths=c(0.1,1,1),heights=c(1.5,1,1,1,1,0.3))
+
+#First graph: scalogram:--------------------
+Col <- rep(rgb(1,1,1,0),length(RsqMEMs))
+names(Col) <- names(RsqMEMs)
+Col[colnames(MEMsSel)] <- "black"
+Col[colnames(MEMsSel)[MEMsSelNumb>80]] <- "dodgerblue3"
+Bg <- rep(rgb(1,1,1,0),length(RsqMEMs))
+names(Bg) <- names(RsqMEMs)
+Bg[colnames(MEMsSel)] <- "orangered"
+
+par(mar=c(4,12,1,12))
+
+
+plot(RsqMEMs,col="grey50",las=1,ylab="Unadjusted R²",xlab="",type="l",yaxs="i",ylim=c(0,0.1))
+mtext(side=1,"Eigenfunction number",line=2,cex=0.7)
+rect(xleft=80,xright=600,ybottom=-0.01,ytop=0.05,border="dodgerblue3",lwd=1)
+points(RsqMEMs,pch=21,bg=Bg,col=Col,xpd=NA)
+mtext("(a)",line=-1,at=-150,font=2,cex=0.8)
+text(x=250,y=0.04,"Tidal model",col="dodgerblue3",font=4)
+text(x=75,y=0.08,"Full model",col="orangered",font=4)
+
+#First series of graphs: full data and model:----------------
+par(mar=c(0.15,2,0.15,1))
+plot(timeTable$RawTimes,data$salinity,pch=20,cex=0.5,las=1,ylab="Salinity (PSU)",xlab="",xaxt="n",xpd=NA)
+points(timeTable$RawTimes,predict(rdaMEMSel)[,"salinity"],type="l",col="orangered")
+mtext("(b) Full model",at=min(timeTable$RawTimes),line=0.5,font=2,cex=0.8)
+
+plot(timeTable$RawTimes,data$temperature,pch=20,cex=0.5,las=1,ylab="Temperature (°C)",xlab="",xaxt="n",xpd=NA)
+points(timeTable$RawTimes,predict(rdaMEMSel)[,"temperature"],type="l",col="orangered")
+
+plot(timeTable$RawTimes,data$oxygen,pch=20,cex=0.5,las=1,ylab="Oxygen (ml/l)",xlab="",xaxt="n",xpd=NA)
+points(timeTable$RawTimes,predict(rdaMEMSel)[,"oxygen"],type="l",col="orangered")
+
+plot(timeTable$RawTimes,data$fluo,pch=20,cex=0.5,las=1,ylab="Fluorescence (Log10(FFU+1))",xlab="",xpd=NA)
+points(timeTable$RawTimes,predict(rdaMEMSel)[,"fluo"],type="l",col="orangered")
+
+#Second series of graphs: tidal data and model:-------------
+plot(timeTable$RawTimes,data$salinity
+     -predict(rdaLS)[,"salinity"]
+     -(predict(rdaMS)[,"salinity"]-mean(predict(rdaMS)[,"salinity"])),
+     pch=20,cex=0.5,las=1,ylab="",xlab="",xaxt="n")
+abline(h=0)
+points(timeTable$RawTimes,predict(rdaSS_Sel)[,"salinity"]-mean(predict(rdaSS_Sel)[,"salinity"]),
+       type="l",col="dodgerblue3")
+mtext("(c) Tidal model",at=max(timeTable$RawTimes),line=0.5,fon=2,adj=1,cex=0.8)
+
+plot(timeTable$RawTimes,data$temperature
+     -predict(rdaLS)[,"temperature"]
+     -(predict(rdaMS)[,"temperature"]-mean(predict(rdaMS)[,"temperature"])),
+     pch=20,cex=0.5,las=1,ylab="",xlab="",xaxt="n")
+abline(h=0)
+points(timeTable$RawTimes,predict(rdaSS_Sel)[,"temperature"]-mean(predict(rdaSS_Sel)[,"temperature"]),
+       type="l",col="dodgerblue3")
+
+plot(timeTable$RawTimes,data$oxygen
+     -predict(rdaLS)[,"oxygen"]
+     -(predict(rdaMS)[,"oxygen"]-mean(predict(rdaMS)[,"oxygen"])),
+     pch=20,cex=0.5,las=1,ylab="",xlab="",xaxt="n")
+abline(h=0)
+points(timeTable$RawTimes,predict(rdaSS_Sel)[,"oxygen"]-mean(predict(rdaSS_Sel)[,"oxygen"]),
+       type="l",col="dodgerblue3")
+
+plot(timeTable$RawTimes,data$fluo
+     -predict(rdaLS)[,"fluo"]
+     -(predict(rdaMS)[,"fluo"]-mean(predict(rdaMS)[,"fluo"])),
+     pch=20,cex=0.5,las=1,ylab="",xlab="",xpd=NA)
+abline(h=0)
+points(timeTable$RawTimes,predict(rdaSS_Sel)[,"fluo"]-mean(predict(rdaSS_Sel)[,"fluo"]),
+       type="l",col="dodgerblue3")
+
+#END--------------
+dev.off()
+```
+
+
+# Cyclical trajectory analysis: look at the tidal cycle
+### General visualization and scaling of raw data
+
+```{r fig = TRUE, fig.height=5, fig.width=5, fig.align = "center"}
+pca <- dudi.pca(data,scannf = F,nf = ncol(data))
+plot(pca$li[,1:2],asp=1,las=1,col="white",main="Raw data",
+     xlab=paste0("Axis 1 (",round((pca$eig[1]/sum(pca$eig))*100,2)," %)"),
+     ylab=paste0("Axis 2 (",round((pca$eig[2]/sum(pca$eig))*100,2)," %)"))
+text(x=pca$li[,1],y=pca$li[,2],
+     mday(timeTable$RawTimes),
+     cex=0.5,col=color_values(timeTable$RawTimes))
+factor <- 2.5
+arrows(x0=0,y0=0,
+       x1=pca$c1[,1]*factor,y1=pca$c1[,2]*factor,
+       col="orangered",lwd=2,length=0.2)
+text(x=pca$c1[,1]*factor,y=pca$c1[,2]*factor,
+     rownames(pca$c1),
+     col="orangered",pos=c(3,2,2,1),xpd=NA)
+```
+
+In this graph, the number are the day of the month (april here). Most point agglomerate in a central blob with a clear trend from the start of the time series (right, blue) to the end (left, yellow) moving towards higher temperature and oxygen (and somewhat higher fluo): This correspond to the seasonnal change.  
+In addition we see the low salinity events pointing downwards (around the 3 and the 16 of April) and a high temperature/oxygen/fluo event towards the end of the series (set of points going towards the left).  
+
+
+We then put this in an ecotraj format:
+```{r}
+data_scaled <- pca$li
+d <- dist(data_scaled)
+
+#Note that we use "Tidetimes" in the timeTable object as times for trajectory definition
+#Tidetimes where obtained from SHOM data:
+#they hit an integer at each high tide and are at integer +0.5 at low tide
+#They serve as some sort of "tidal time"
+CyclicTraj <- defineTrajectories(d=d,times=timeTable$TideTimes,
+                                 sites=rep("Sainte-Anne",nrow(timeTable)))
+TideCycles <- extractCycles(CyclicTraj,cycleDuration = 1)
+```
+
+### General visualization and scaling of the tidal modeled data (model with selection)
+
+```{r fig = TRUE, fig.height=5, fig.width=5, fig.align = "center"}
+dataTideAlone <- predict(rdaSS_Sel)
+pca <- dudi.pca(dataTideAlone,scannf = F,nf = ncol(data))
+plot(pca$li[,1:2],asp=1,las=1,col="white",main="Tide-scale modeled data with selection",
+     xlab=paste0("Axis 1 (",round((pca$eig[1]/sum(pca$eig))*100,2)," %)"),
+     ylab=paste0("Axis 2 (",round((pca$eig[2]/sum(pca$eig))*100,2)," %)"))
+text(x=pca$li[,1],y=pca$li[,2],
+     mday(timeTable$RawTimes),
+     cex=0.5,col=color_values(timeTable$RawTimes))
+factor <- 2.5
+arrows(x0=0,y0=0,
+       x1=pca$c1[,1]*factor,y1=pca$c1[,2]*factor,
+       col="orangered",lwd=2,length=0.2)
+text(x=pca$c1[,1]*factor,y=pca$c1[,2]*factor,
+     rownames(pca$c1),
+     col="orangered",pos=c(3,2,2,1),xpd=NA)
+```
+
+Note that mlong term trends (seasonality) does not appear anymore. It's expected: We are on the tidal model. Most point agglomerate in a central blob but some extended outside of it: these are the "unusual" tides discussed in the main text. 
+
+Ecotraj format:
+```{r}
+dataModeledSel_TideAlone_scaled <- pca$li
+d <- dist(dataModeledSel_TideAlone_scaled)
+
+CyclicTrajModeledSel_TideAlone <- defineTrajectories(d=d,times=timeTable$TideTimes,
+                                           sites=rep("Sainte-Anne",nrow(timeTable)))
+TideCyclesModeledSel_TideAlone <- extractCycles(CyclicTrajModeledSel_TideAlone,cycleDuration = 1)
+```
+
+### Assess the shape of the cycles as a function of models
+
+Compute convexities:
+```{r}
+Conv <- cycleConvexity(CyclicTraj,cycleDuration = 1)
+ConvTideAloneSel <- cycleConvexity(CyclicTrajModeledSel_TideAlone,cycleDuration = 1)
+```
+
+### Making figure 13 in the paper
+
+Note that this one will change each time as three cycles are randomly choosen.
+```{r}
+pdf(file="Figure 13.pdf",width=6,height=2.7)
+layout(matrix(c(rep(8,4),8,1,2,8,8,3,4,8,8,5,6,8,8,7,7,8),4,5),widths=c(0.2,1,1,1,2),heights=c(0.1,1,1,0.2))
+
+#Set of mini-graphs to show some cycles-------
+truc <- "preum's!"
+par(mar=c(0.5,0.5,0.5,0.5),xaxt="n",yaxt="n",ylab="",xlab="")
+for (i in unique(TideCycles$metadata$cycles)[sort(sample(1:length(unique(TideCycles$metadata$cycles)),3))]){
+  subset <- subsetTrajectories(TideCycles,subtrajectory_selection=i)
+  bidule <- cyclePCoA(subset,length=0.05)
+  if (truc=="preum's!"){
+    mtext("Raw data",side=2,line=0.5,xpd=NA,cex=0.7)
+    mtext("(a)",line=-1,at=(max(bidule$points[,1])-min(bidule$points[,1]))*-0.65
+          ,font=2,cex=0.8)
+  }
+  cycleName <- gsub("Sainte-Anne_C","Cycle ",i)
+  mtext(cycleName,xpd=NA,line=0.2,cex=0.7)
+  
+  
+  subset <- subsetTrajectories(TideCyclesModeledSel_TideAlone,subtrajectory_selection=i)
+  cyclePCoA(subset,length=0.05,cycles.colors = "dodgerblue3")
+  if (truc=="preum's!"){
+    mtext("Tidal model",side=2,line=0.5,xpd=NA,cex=0.7)
+  }
+  truc <- "Pu preum's )':"
+}
+
+#Boxplot for Convexity-------
+
+par(mar=c(0.5,5,0.5,0.5))
+boxplot(data.frame(Conv,ConvTideAloneSel),
+        las=1,ylab="Cycle convexity",
+        names= c("Raw data","Tidal model"),
+        xaxt="s",yaxt="s",col="white",border="white")
+boxplot(data.frame(Conv,ConvTideAloneSel),
+        las=1,ylab="Cycle convexity",
+        names= c("Raw data","Tidal model"),
+        xaxt="s",yaxt="s",outline=F,add=T)
+stripchart(data.frame(Conv),method="jitter",jitter=0.2,
+           vertical=T,add=T,pch=21,bg=rgb(0,0,0,0.5),at=1,cex=1.5)
+stripchart(data.frame(ConvTideAloneSel),method="jitter",jitter=0.2,
+           vertical=T,add=T,pch=21,bg=rgb(t(col2rgb("dodgerblue3")/256),alpha=0.5),at=2,cex=1.5)
+mtext("(b)",line=-1,at=0,font=2,cex=0.8)
+#END--------------
+dev.off()
+
+```
+
+
+### Derive some cycle stats from the modeled data
+Compute them:
+```{r}
+Lengths <- trajectoryLengths(TideCyclesModeledSel_TideAlone)
+Convexities <- ConvTideAloneSel
+times <- tapply(TideCyclesModeledSel_TideAlone$metadata$times
+                [TideCyclesModeledSel_TideAlone$metadata$internal],
+                TideCyclesModeledSel_TideAlone$metadata$cycles
+                [TideCyclesModeledSel_TideAlone$metadata$internal],
+                min)
+times <- times[rownames(Lengths)]
+times <- timeTable$RawTimes[timeTable$TideTimes%in%times]
+
+Lengths <- Lengths$Path
+
+Metrics <- data.frame(times,Lengths,Convexities)
+
+```
+
+### Dissimilarity between tidal cycles
+Compute them:
+```{r}
+distTidalCycles <- trajectoryDistances(TideCyclesModeledSel_TideAlone)
+```
+
+### Making figure 13 in the paper
+Plot them in a PCoA:
+```{r}
+pdf(file="Figure 14.pdf",width=4,height=6)
+layout(matrix(1:2,2,1),heights=c(0.4,1))
+par(mar=c(1,4,0.2,1.3))
+#First plot: tidal cycles lengths---------
+plot(x=Metrics$times,y=Metrics$Lengths,
+     ylab="Cycle length",xlab="",type="b",las=1,pch=21,bg="dodgerblue3")
+mtext("(a)",line=-1,at=min(Metrics$times)-(max(Metrics$times)-min(Metrics$times))*0.27,
+      font=2,cex=0.8)
+#Second plot: PCoA on cycles-------
+par(mar=c(4,4,1.3,1.3),xpd=NA)
+pcoaDistTidalCycles <- pcoa(distTidalCycles)
+plot(pcoaDistTidalCycles$vectors,
+     xlab=paste0("Axis 1 (",round(pcoaDistTidalCycles$values$Relative_eig[1]*100,2)," %)"),
+     ylab=paste0("Axis 2 (",round(pcoaDistTidalCycles$values$Relative_eig[2]*100,2)," %)"),
+     asp=1,las=1,col="white")
+arrows(x0=pcoaDistTidalCycles$vectors[1:(nrow(pcoaDistTidalCycles$vectors)-1),1],
+       y0=pcoaDistTidalCycles$vectors[1:(nrow(pcoaDistTidalCycles$vectors)-1),2],
+       x1=pcoaDistTidalCycles$vectors[2:nrow(pcoaDistTidalCycles$vectors),1],
+       y1=pcoaDistTidalCycles$vectors[2:nrow(pcoaDistTidalCycles$vectors),2],
+       col=colour_values(apply(
+         cbind(Metrics$times[1:(nrow(Metrics)-1)],Metrics$times[2:nrow(Metrics)])
+         ,1,mean)),
+       length=0.1,lwd=2)
+text(x=pcoaDistTidalCycles$vectors[c(4:7,29,30,44,54,56,57),1],y=pcoaDistTidalCycles$vectors[c(4:7,29,30,44,54,56,57),2],
+     mday(Metrics$times)[c(4:7,29,30,44,54,56,57)],
+     col="grey40",pos=c(1,3,4,1,2,2,1,1,2,1))
+mtext("(b)",line=-1,at=min(pcoaDistTidalCycles$vectors[,1])-(max(pcoaDistTidalCycles$vectors[,1])-min(pcoaDistTidalCycles$vectors[,1]))*0.27,
+      font=2,cex=0.8)
+legend(legend=expression(paste(Omega[C]," space")),bty="n",x="topright",text.font=4)
+#END--------------
+dev.off()
+```
+
+
