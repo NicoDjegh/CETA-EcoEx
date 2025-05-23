@@ -10,6 +10,8 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 # Data calling and formating
+
+The shorebird data is produced by the [Réserve Naturelle de la baie de Saint-Brieuc](https://www.reservebaiedesaintbrieuc.com/) and was provided by Anthony Sturbois.
 ```{r}
 data <- read.csv("shorebirds_data.csv",sep=";",dec=",")
 
