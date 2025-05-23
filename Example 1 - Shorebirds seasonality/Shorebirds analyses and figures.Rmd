@@ -1,0 +1,161 @@
+---
+title: "Shorebirds analyses and figures"
+author: "Nicolas Djeghri"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data calling and formating
+```{r}
+data <- read.csv("shorebirds_data.csv",sep=";",dec=",")
+
+#go wide format (assuming missing lines are 0 abundances):
+time <-integer(0)
+counts <- integer(0)
+
+for (i in unique(data$annee)){
+  dataSelec <- data[data$annee==i,]
+  for (j in unique(dataSelec$mois)){
+    dataSelecBis <- dataSelec[dataSelec$mois==j,]
+    countsj <- dataSelecBis$nb
+    names(countsj) <- dataSelecBis$TAXO_VERNACUL
+    
+    counts <- rbind(counts,countsj[unique(data$TAXO_VERNACUL)])
+    time <- c(time,i+(j-0.5)/12)
+  }
+}
+colnames(counts) <- unique(data$TAXO_VERNACUL)
+counts[is.na(counts)] <- 0
+
+#clean the names
+colnames(counts) <- c("Barge rousse","Becasseau maubeche","Becasseau variable",
+                      "Bernache cravant","Canard chipeau","Canard colvert",
+                      "Canard pilet","Canard siffleur","Canard souchet",
+                      "Courlis cendre","Huitrier pie","Macreuse noire",
+                      "Pluvier argente","Sarcelle d'hiver","Tadorne de Belon",
+                      "Tournepierre a collier","Becasseau sanderling","Grand gravelot")
+```
+
+# General description of seasonal community dynamics
+### Prepping
+
+Start by calling the necessary packages:
+```{r}
+library(vegan)
+library(ecotraj)#Main package for trajectory analysis: using version 1.1.0 here
+library(ape)
+library(cmocean)
+library(colourvalues)
+library(Kendall)
+```
+
+Put the object in ecotraj format and make some simple analyses:
+```{r}
+d <- vegdist(counts)#we take the Bray-Curtis distance
+
+Traj <- defineTrajectories(d,times=time,sites=rep("BIRB!!!",length(time)))
+Cycles <- extractCycles(Traj,cycleDuration = 1,
+                        minEcolStates = 12,
+                        startdate = 5.5/12)
+#Note that we make the cycle start at date 5.5/12 (this corresponds to June)
+#This is because in that site bird populations are most abundant in winter.
+
+#Compute a "year" for each cycle and
+#rename the cycles with something more convenient
+yearCycles <- floor(tapply(Cycles$metadata$times,Cycles$metadata$cycles,mean))
+Cycles$metadata$cycles <- as.character(yearCycles[Cycles$metadata$cycles])
+
+#compute the distance between cycles
+dCycles <- trajectoryDistances(Cycles)
+#and PCoA to visualize them
+pcoa <- pcoa(dCycles)
+```
+
+### Making figure 5
+```{r}
+colcycles <- colour_values(as.numeric(rownames(pcoa$vectors)),"viridis")
+names(colcycles) <- rownames(pcoa$vectors)
+
+pdf("Figure 5.pdf",width=8,height=3.5)
+
+layout(matrix(1:2,1,2))
+
+#Cycles-----------
+par(las=1,mar=c(4,4,1,1),xaxt="n")
+cyclePCoA(Cycles,length=0.1,cycles.colors=colcycles,print.init.points = TRUE)
+par(xaxt="s")
+axis(side=1,at=c(-0.6,-0.3,0,0.3,0.6),labels=c(-0.6,-0.3,0,0.3,0.6))
+text(c("Summer","Winter"),x=c(-0.6,0.5),y=c(0.4,0.42),pos=c(3,3),col="grey40",font=4)
+legend(legend=expression(paste(Omega[0]," space")),bty="n",x="bottomright",text.font=4)
+mtext(side=3,"(a)",cex=0.8,at=-1.05,xpd=NA,line=-1,font=2)
+
+#distances between cycles------------
+plot(pcoa$vectors[,c(1,2)],las=1,col="white",asp=1,pch=16,
+     xlab=paste0("PCoA 1 (",round(pcoa$values$Relative_eig[1]*100)," %)"),
+     ylab=paste0("PCoA 2 (",round(pcoa$values$Relative_eig[2]*100)," %)"),
+)
+text(x=pcoa$vectors[,1],y=pcoa$vectors[,2],rownames(pcoa$vectors),col=colcycles,font=2,xpd=NA)
+legend(legend=expression(paste(Omega[C]," space")),bty="n",x="bottomright",text.font=4)
+mtext(side=3,"(b)",cex=0.8,at=-0.3,xpd=NA,line=-1,font=2)
+
+#END--------
+dev.off()
+```
+# Time series of cycles descriptors
+### Computing
+```{r}
+#Convexity
+Convexity <- cycleConvexity(Traj,cycleDuration = 1,
+                            minEcolStates = 12,
+                            startdate = 5.5/12)
+names(Convexity) <- as.character(yearCycles[names(Convexity)])
+
+#Lengths
+Lengths <- trajectoryLengths(Cycles)
+
+#LCdBDs
+A <- (-0.5*(as.matrix(dCycles)^2))
+G <- (diag(ncol(A))-(rep(1,ncol(A))%*%t(rep(1,ncol(A)))/ncol(A)))%*%
+      A%*%
+     (diag(ncol(A))-(rep(1,ncol(A))%*%t(rep(1,ncol(A)))/ncol(A)))
+LCdBDs <- diag(G)/sum(diag(G))
+names(LCdBDs) <- rownames(A)
+```
+
+### Making figure 6
+```{r}
+pdf("Figure 6.pdf",width=4,height=6)
+
+layout(matrix(1:5,5,1),heights=c(1,1,1,1,0.2))
+par(mar=c(0.5,4,0.5,1))
+plot(as.numeric(rownames(pcoa$vectors)),pcoa$vectors[,1],las=1,type="l",ylab="PCoA 1",xlab="",xaxt="n")
+points(as.numeric(rownames(pcoa$vectors)),pcoa$vectors[,1],bg=colcycles,pch=21,cex=2,xpd=NA)
+mtext(side=3,"(a)",cex=0.8,at=1997,xpd=NA,line=-1,font=2)
+
+plot(y=Convexity,x=as.numeric(names(Convexity)),las=1,type="l",ylab="Cycle convexity",xlab="",xaxt="n")
+points(y=Convexity,x=as.numeric(names(Convexity)),bg=colcycles,pch=21,cex=2,xpd=NA)
+mtext(side=3,"(b)",cex=0.8,at=1997,xpd=NA,line=-1,font=2)
+
+plot(y=Lengths$Path,x=as.numeric(rownames(Lengths)),las=1,type="l",ylab="Cycle length",xlab="",xaxt="n")
+points(y=Lengths$Path,x=as.numeric(rownames(Lengths)),bg=colcycles,pch=21,cex=2,xpd=NA)
+mtext(side=3,"(c)",cex=0.8,at=1997,xpd=NA,line=-1,font=2)
+
+plot(y=LCdBDs*100,x=as.numeric(names(LCdBDs)),type="l",las=1,ylab="'LCdBD' (%)",xlab="",xpd=NA)
+points(y=LCdBDs*100,x=as.numeric(names(LCdBDs)),bg=colcycles,pch=21,cex=2,xpd=NA)
+mtext(side=3,"(d)",cex=0.8,at=1997,xpd=NA,line=-1,font=2)
+
+dev.off()
+```
+
+### Tests for the trends
+
+```{r}
+MannKendall(pcoa$vectors[,1])
+MannKendall(Convexity)
+MannKendall(Lengths$Path)
+MannKendall(LCdBDs)
+```
