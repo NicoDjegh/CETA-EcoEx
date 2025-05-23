@@ -22,7 +22,7 @@ library(colourvalues)
 ```
 
 ### Call the data
-The data called here originates from the Coast-HF [Iroise buoy](https://www-iuem.univ-brest.fr/observation/coastal-and-littoral-observation/coast-hf-iroise/?lang=en). Fluorescence has already been log10 + 1 transformed
+The data called here originates from the Coast-HF [Iroise buoy](https://www-iuem.univ-brest.fr/observation/coastal-and-littoral-observation/coast-hf-iroise/?lang=en) part of [IR-ILICO](https://www.ir-ilico.fr) research structure. Fluorescence (FFU) has already been log10 + 1 transformed. Salinity is expressed in PSU, Temperature in °C and Oxygen in ml/l.
 ```{r}
 data <- read.csv("data_Iroise_selected.csv",row.names=1) #contains the data
 timeTable <- read.csv("timeTable_Iroise_selected.csv",row.names=1) #contains observation times as well as information on tides (obtained from the SHOM)
