@@ -519,7 +519,7 @@ Compute them:
 distTidalCycles <- trajectoryDistances(TideCyclesModeledSel_TideAlone)
 ```
 
-### Making figure 13 in the paper
+### Making figure 14 in the paper
 Plot them in a PCoA:
 ```{r}
 pdf(file="Figure 14.pdf",width=4,height=6)
